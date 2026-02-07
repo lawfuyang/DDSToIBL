@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include <math_constants.h>
+#include <algorithm>
 
 // Constants
 const int COMPONENTS_PER_PIXEL_CUDA = 4;
@@ -37,7 +38,9 @@ __device__ inline float3 cross(float3 a, float3 b)
 }
 __device__ inline float3 normalize(float3 v)
 {
-    float invLen = 1.0f / sqrtf(dot(v, v));
+    float lenSq = dot(v, v);
+    if (lenSq < 1e-8f) return make_float3(0, 0, 0);
+    float invLen = 1.0f / sqrtf(lenSq);
     return v * invLen;
 }
 
@@ -97,33 +100,34 @@ __device__ float3 ImportanceSampleGGX(float2 Xi, float roughness, float3 N)
 }
 
 // Global kernels
-__global__ void BakeIrradianceKernel(cudaTextureObject_t envMap, float* dst, int size, bool isCubemap)
+__global__ void BakeIrradianceKernel(cudaTextureObject_t envMap, float* dst, int width, int height, bool isCubemap)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int face = blockIdx.z;
 
-    if (x >= size || y >= size) return;
+    if (x >= width || y >= height) return;
 
     float3 Ndir;
     if (isCubemap)
     {
-        float u = (2.0f * (x + 0.5f) / size) - 1.0f;
-        float v = 1.0f - (2.0f * (y + 0.5f) / size);
+        float u = (2.0f * (x + 0.5f) / width) - 1.0f;
+        float v = 1.0f - (2.0f * (y + 0.5f) / height);
         Ndir = FaceUVToDir(face, u, v);
     }
     else
     {
         // For 2D texture, assume equirectangular
-        float u = (x + 0.5f) / size;
-        float v = (y + 0.5f) / size;
+        float u = (x + 0.5f) / width;
+        float v = (y + 0.5f) / height;
         float theta = v * CUDART_PI_F; // polar angle
         float phi = u * 2.0f * CUDART_PI_F; // azimuthal angle
         Ndir = make_float3(sinf(theta) * cosf(phi), cosf(theta), sinf(theta) * sinf(phi));
     }
+    
     float3 irradiance = make_float3(0, 0, 0);
 
-    float3 up = make_float3(0.0f, 1.0f, 0.0f);
+    float3 up = fabsf(Ndir.y) < 0.999f ? make_float3(0, 1, 0) : make_float3(0, 0, 1);
     float3 right = normalize(cross(up, Ndir));
     up = normalize(cross(Ndir, right));
 
@@ -146,9 +150,9 @@ __global__ void BakeIrradianceKernel(cudaTextureObject_t envMap, float* dst, int
             else
             {
                 // For 2D equirectangular
-                float u = atan2f(sampleVec.x, sampleVec.z) / (2.0f * CUDART_PI_F) + 0.5f;
-                float v = acosf(fmaxf(-1.0f, fminf(1.0f, sampleVec.y))) / CUDART_PI_F;
-                tex = tex2DLod<float4>(envMap, u, v, 0.0f);
+                float u_coord = atan2f(sampleVec.x, sampleVec.z) / (2.0f * CUDART_PI_F) + 0.5f;
+                float v_coord = acosf(fmaxf(-1.0f, fminf(1.0f, sampleVec.y))) / CUDART_PI_F;
+                tex = tex2DLod<float4>(envMap, u_coord, v_coord, 0.0f);
             }
             irradiance += make_float3(tex.x, tex.y, tex.z) * cosTheta * sinTheta;
             nrSamples++;
@@ -156,39 +160,40 @@ __global__ void BakeIrradianceKernel(cudaTextureObject_t envMap, float* dst, int
     }
     irradiance = CUDART_PI_F * irradiance * (1.0f / nrSamples);
 
-    int pixelOffset = (face * size * size + y * size + x) * 4;
+    int pixelOffset = (face * width * height + y * width + x) * 4;
     dst[pixelOffset + 0] = irradiance.x;
     dst[pixelOffset + 1] = irradiance.y;
     dst[pixelOffset + 2] = irradiance.z;
     dst[pixelOffset + 3] = 1.0f;
 }
 
-__global__ void BakeRadianceKernel(cudaTextureObject_t envMap, float* dst, int size, int mip, int totalMips, int sampleCount, float srcSize, bool isCubemap)
+__global__ void BakeRadianceKernel(cudaTextureObject_t envMap, float* dst, int width, int height, int mip, int totalMips, int sampleCount, float srcWidth, float srcHeight, bool isCubemap)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int face = blockIdx.z;
 
-    if (x >= size || y >= size) return;
+    if (x >= width || y >= height) return;
 
     float roughness = (totalMips <= 1) ? 0.0f : (float)mip / (float)(totalMips - 1);
 
     float3 Ndir;
     if (isCubemap)
     {
-        float u = (2.0f * (x + 0.5f) / size) - 1.0f;
-        float v = 1.0f - (2.0f * (y + 0.5f) / size);
+        float u = (2.0f * (x + 0.5f) / width) - 1.0f;
+        float v = 1.0f - (2.0f * (y + 0.5f) / height);
         Ndir = FaceUVToDir(face, u, v);
     }
     else
     {
         // For 2D texture, assume equirectangular
-        float u = (x + 0.5f) / size;
-        float v = (y + 0.5f) / size;
+        float u = (x + 0.5f) / width;
+        float v = (y + 0.5f) / height;
         float theta = v * CUDART_PI_F; // polar angle
         float phi = u * 2.0f * CUDART_PI_F; // azimuthal angle
         Ndir = make_float3(sinf(theta) * cosf(phi), cosf(theta), sinf(theta) * sinf(phi));
     }
+
     float3 V = Ndir;
     float3 prefilteredColor = make_float3(0, 0, 0);
     float totalWeight = 0.0f;
@@ -207,7 +212,7 @@ __global__ void BakeRadianceKernel(cudaTextureObject_t envMap, float* dst, int s
             float D = DistributionGGX(NdotH, roughness);
             float pdf = (D * NdotH / (4.0f * VdotH)) + 0.0001f;
 
-            float saTexel = 4.0f * CUDART_PI_F / (float(isCubemap ? 6 : 1) * srcSize * srcSize);
+            float saTexel = 4.0f * CUDART_PI_F / (float(isCubemap ? 6 : 1) * srcWidth * srcHeight);
             float saSample = 1.0f / (float(sampleCount) * pdf + 0.0001f);
             float mipSource = (roughness == 0.0f) ? 0.0f : 0.5f * log2f(saSample / saTexel);
 
@@ -219,9 +224,9 @@ __global__ void BakeRadianceKernel(cudaTextureObject_t envMap, float* dst, int s
             else
             {
                 // For 2D equirectangular
-                float u = atan2f(L.x, L.z) / (2.0f * CUDART_PI_F) + 0.5f;
-                float v = acosf(fmaxf(-1.0f, fminf(1.0f, L.y))) / CUDART_PI_F;
-                tex = tex2DLod<float4>(envMap, u, v, mipSource);
+                float u_coord = atan2f(L.x, L.z) / (2.0f * CUDART_PI_F) + 0.5f;
+                float v_coord = acosf(fmaxf(-1.0f, fminf(1.0f, L.y))) / CUDART_PI_F;
+                tex = tex2DLod<float4>(envMap, u_coord, v_coord, mipSource);
             }
             prefilteredColor += make_float3(tex.x, tex.y, tex.z) * NdotL;
             totalWeight += NdotL;
@@ -230,38 +235,41 @@ __global__ void BakeRadianceKernel(cudaTextureObject_t envMap, float* dst, int s
 
     if (totalWeight > 0.0f) prefilteredColor /= totalWeight;
 
-    // Output offset calculation needs to account for previous mips if dst is a single pointer
-    // But we'll pass the pointer to the start of the current mip for simplicity
-    int pixelOffset = (face * size * size + y * size + x) * 4;
+    int pixelOffset = (face * width * height + y * width + x) * 4;
     dst[pixelOffset + 0] = prefilteredColor.x;
     dst[pixelOffset + 1] = prefilteredColor.y;
     dst[pixelOffset + 2] = prefilteredColor.z;
     dst[pixelOffset + 3] = 1.0f;
 }
 
-// Function to create a cubemap texture object from Cubemap struct
-cudaTextureObject_t CreateCubemapTexture(const Cubemap& src, cudaMipmappedArray_t& mipArray)
+// Helper to create a texture object from TextureData struct (supports both 2D and Cubemap)
+cudaTextureObject_t CreateTextureCUDA(const TextureData& src, cudaMipmappedArray_t& mipArray)
 {
+    bool isCubemap = (src.numFaces == 6);
     cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float4>();
     
-    cudaExtent extent = make_cudaExtent(src.size, src.size, CUBEMAP_FACES_CUDA);
-    CUDA_CHECK(cudaMallocMipmappedArray(&mipArray, &channelDesc, extent, src.mipCount, cudaArrayCubemap));
+    // For 2D arrays, depth MUST be 0 in cudaMallocMipmappedArray, but for cubemaps it is the number of faces
+    cudaExtent extent = make_cudaExtent(src.width, src.height, isCubemap ? CUBEMAP_FACES_CUDA : 0);
+    unsigned int flags = isCubemap ? cudaArrayCubemap : 0;
+    
+    CUDA_CHECK(cudaMallocMipmappedArray(&mipArray, &channelDesc, extent, src.mipCount, flags));
 
-    int floatOffset = 0;
+    size_t floatOffset = 0;
     for (int m = 0; m < src.mipCount; ++m)
     {
-        int mipSize = std::max(1, src.size >> m);
+        int mipW = std::max(1, src.width >> m);
+        int mipH = std::max(1, src.height >> m);
         cudaArray_t levelArray;
         CUDA_CHECK(cudaGetMipmappedArrayLevel(&levelArray, mipArray, m));
 
         cudaMemcpy3DParms copyParams{};
-        copyParams.srcPtr = make_cudaPitchedPtr((void*)&src.data[floatOffset], mipSize * 4 * sizeof(float), mipSize, mipSize);
+        copyParams.srcPtr = make_cudaPitchedPtr((void*)&src.data[floatOffset], mipW * 4 * sizeof(float), mipW, mipH);
         copyParams.dstArray = levelArray;
-        copyParams.extent = make_cudaExtent(mipSize, mipSize, CUBEMAP_FACES_CUDA);
+        copyParams.extent = make_cudaExtent(mipW, mipH, src.numFaces);
         copyParams.kind = cudaMemcpyHostToDevice;
         CUDA_CHECK(cudaMemcpy3D(&copyParams));
 
-        floatOffset += mipSize * mipSize * CUBEMAP_FACES_CUDA * COMPONENTS_PER_PIXEL_CUDA;
+        floatOffset += (size_t)mipW * mipH * src.numFaces * COMPONENTS_PER_PIXEL_CUDA;
     }
 
     cudaResourceDesc resDesc{};
@@ -269,83 +277,32 @@ cudaTextureObject_t CreateCubemapTexture(const Cubemap& src, cudaMipmappedArray_
     resDesc.res.mipmap.mipmap = mipArray;
 
     cudaTextureDesc texDesc{};
-    texDesc.addressMode[0] = cudaAddressModeClamp;
+    texDesc.addressMode[0] = isCubemap ? cudaAddressModeClamp : cudaAddressModeWrap;
     texDesc.addressMode[1] = cudaAddressModeClamp;
     texDesc.addressMode[2] = cudaAddressModeClamp;
     texDesc.filterMode = cudaFilterModeLinear;
     texDesc.mipmapFilterMode = cudaFilterModeLinear;
     texDesc.readMode = cudaReadModeElementType;
-    texDesc.normalizedCoords = 0; // Use direction vectors for cubemaps
+    texDesc.normalizedCoords = isCubemap ? 0 : 1;
     
     cudaTextureObject_t texObj = 0;
     CUDA_CHECK(cudaCreateTextureObject(&texObj, &resDesc, &texDesc, NULL));
     return texObj;
 }
 
-// Function to create a 2D texture object from Cubemap struct (for 2D textures)
-cudaTextureObject_t CreateTexture2D(const Cubemap& src, cudaMipmappedArray_t& mipArray)
-{
-    cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float4>();
-    
-    cudaExtent extent = make_cudaExtent(src.size, src.size, 1);
-    CUDA_CHECK(cudaMallocMipmappedArray(&mipArray, &channelDesc, extent, src.mipCount, 0));
-
-    int floatOffset = 0;
-    for (int m = 0; m < src.mipCount; ++m)
-    {
-        int mipSize = std::max(1, src.size >> m);
-        cudaArray_t levelArray;
-        CUDA_CHECK(cudaGetMipmappedArrayLevel(&levelArray, mipArray, m));
-
-        cudaMemcpy3DParms copyParams{};
-        copyParams.srcPtr = make_cudaPitchedPtr((void*)&src.data[floatOffset], mipSize * 4 * sizeof(float), mipSize, mipSize);
-        copyParams.dstArray = levelArray;
-        copyParams.extent = make_cudaExtent(mipSize, mipSize, 1);
-        copyParams.kind = cudaMemcpyHostToDevice;
-        CUDA_CHECK(cudaMemcpy3D(&copyParams));
-
-        floatOffset += mipSize * mipSize * 4;
-    }
-
-    cudaResourceDesc resDesc{};
-    resDesc.resType = cudaResourceTypeMipmappedArray;
-    resDesc.res.mipmap.mipmap = mipArray;
-
-    cudaTextureDesc texDesc{};
-    texDesc.addressMode[0] = cudaAddressModeWrap;
-    texDesc.addressMode[1] = cudaAddressModeClamp;
-    texDesc.addressMode[2] = cudaAddressModeClamp;
-    texDesc.filterMode = cudaFilterModeLinear;
-    texDesc.mipmapFilterMode = cudaFilterModeLinear;
-    texDesc.readMode = cudaReadModeElementType;
-    texDesc.normalizedCoords = 1; // Use normalized coords for 2D
-    
-    cudaTextureObject_t texObj = 0;
-    CUDA_CHECK(cudaCreateTextureObject(&texObj, &resDesc, &texDesc, NULL));
-    return texObj;
-}
-
-void BakeIrradianceCUDA(const Cubemap& src, Cubemap& dst, int numFaces)
+void BakeIrradianceCUDA(const TextureData& src, TextureData& dst)
 {
     cudaMipmappedArray_t envMipArray;
-    cudaTextureObject_t envMap;
-    if (numFaces == 6)
-    {
-        envMap = CreateCubemapTexture(src, envMipArray);
-    }
-    else
-    {
-        envMap = CreateTexture2D(src, envMipArray);
-    }
+    cudaTextureObject_t envMap = CreateTextureCUDA(src, envMipArray);
 
     float* d_dst;
-    size_t dstSize = dst.size * dst.size * numFaces * COMPONENTS_PER_PIXEL_CUDA * sizeof(float);
+    size_t dstSize = (size_t)dst.width * dst.height * dst.numFaces * COMPONENTS_PER_PIXEL_CUDA * sizeof(float);
     CUDA_CHECK(cudaMalloc(&d_dst, dstSize));
 
     dim3 block(BLOCK_SIZE_X, BLOCK_SIZE_Y, 1);
-    dim3 grid((dst.size + block.x - 1) / block.x, (dst.size + block.y - 1) / block.y, numFaces);
+    dim3 grid((dst.width + block.x - 1) / block.x, (dst.height + block.y - 1) / block.y, dst.numFaces);
 
-    BakeIrradianceKernel<<<grid, block>>>(envMap, d_dst, dst.size, numFaces == 6);
+    BakeIrradianceKernel<<<grid, block>>>(envMap, d_dst, dst.width, dst.height, src.numFaces == 6);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -356,40 +313,33 @@ void BakeIrradianceCUDA(const Cubemap& src, Cubemap& dst, int numFaces)
     CUDA_CHECK(cudaFreeMipmappedArray(envMipArray));
 }
 
-void BakeRadianceCUDA(const Cubemap& src, Cubemap& dst, int numFaces)
+void BakeRadianceCUDA(const TextureData& src, TextureData& dst)
 {
     const int sampleCount = 2048;
     cudaMipmappedArray_t envMipArray;
-    cudaTextureObject_t envMap;
-    if (numFaces == 6)
-    {
-        envMap = CreateCubemapTexture(src, envMipArray);
-    }
-    else
-    {
-        envMap = CreateTexture2D(src, envMipArray);
-    }
+    cudaTextureObject_t envMap = CreateTextureCUDA(src, envMipArray);
 
-    int totalFloats = (int)dst.data.size();
     float* d_dst;
-    CUDA_CHECK(cudaMalloc(&d_dst, totalFloats * sizeof(float)));
+    size_t totalBytes = dst.data.size() * sizeof(float);
+    CUDA_CHECK(cudaMalloc(&d_dst, totalBytes));
 
-    int offset = 0;
+    size_t offset = 0;
     for (int mip = 0; mip < dst.mipCount; ++mip)
     {
-        int mipSize = std::max(1, dst.size >> mip);
+        int mipW = std::max(1, dst.width >> mip);
+        int mipH = std::max(1, dst.height >> mip);
         
         dim3 block(BLOCK_SIZE_X, BLOCK_SIZE_Y, 1);
-        dim3 grid((mipSize + block.x - 1) / block.x, (mipSize + block.y - 1) / block.y, numFaces);
+        dim3 grid((mipW + block.x - 1) / block.x, (mipH + block.y - 1) / block.y, dst.numFaces);
 
-        BakeRadianceKernel<<<grid, block>>>(envMap, d_dst + offset, mipSize, mip, dst.mipCount, sampleCount, (float)src.size, numFaces == 6);
+        BakeRadianceKernel<<<grid, block>>>(envMap, d_dst + offset, mipW, mipH, mip, dst.mipCount, sampleCount, (float)src.width, (float)src.height, src.numFaces == 6);
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
 
-        offset += mipSize * mipSize * numFaces * 4;
+        offset += (size_t)mipW * mipH * dst.numFaces * 4;
     }
 
-    CUDA_CHECK(cudaMemcpy(dst.data.data(), d_dst, totalFloats * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(dst.data.data(), d_dst, totalBytes, cudaMemcpyDeviceToHost));
 
     CUDA_CHECK(cudaFree(d_dst));
     CUDA_CHECK(cudaDestroyTextureObject(envMap));

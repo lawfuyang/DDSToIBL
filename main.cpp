@@ -20,7 +20,7 @@ const int DEFAULT_IRR_SIZE = 64;
 const int DEFAULT_RAD_SIZE = 256;
 const int MAX_INPUT_SIZE = 1024;
 
-bool LoadDDSTexture(std::string_view path, Cubemap& cm, bool& isCubemapOut)
+bool LoadDDSTexture(std::string_view path, TextureData& td)
 {
     std::filesystem::path p(path);
     std::wstring wpath = p.wstring();
@@ -38,7 +38,6 @@ bool LoadDDSTexture(std::string_view path, Cubemap& cm, bool& isCubemapOut)
 
     // Allow both cubemaps and 2D textures
     bool isCubemap = metadata.IsCubemap();
-    isCubemapOut = isCubemap;
     if (!isCubemap && metadata.dimension != TEX_DIMENSION_TEXTURE2D)
     {
         printf("Error: Input must be a cubemap or 2D texture.\n");
@@ -70,25 +69,32 @@ bool LoadDDSTexture(std::string_view path, Cubemap& cm, bool& isCubemapOut)
         processed = std::move(image);
     }
 
-    // Performance Optimization: If the input cubemap is extremely large (e.g. 4K), 
+    // Performance Optimization: If the input is extremely large (e.g. 4K), 
     // downsample it to something manageable for IBL baking.
-    // 1024 or 2048 is more than enough for high-quality IBL.
-    if (processed.GetMetadata().width > MAX_INPUT_SIZE || processed.GetMetadata().height > MAX_INPUT_SIZE ||
-        (!isCubemap && processed.GetMetadata().width != processed.GetMetadata().height))
+    if (processed.GetMetadata().width > MAX_INPUT_SIZE || processed.GetMetadata().height > MAX_INPUT_SIZE)
     {
-        int targetSize = (std::min)((int)MAX_INPUT_SIZE, (std::max)((int)processed.GetMetadata().width, (int)processed.GetMetadata().height));
-        printf("Input %s is large or non-square (%zux%zu). Resizing to %dx%d for baking...\n", 
-               isCubemap ? "cubemap" : "texture", processed.GetMetadata().width, processed.GetMetadata().height, targetSize, targetSize);
+        float aspect = (float)processed.GetMetadata().width / (float)processed.GetMetadata().height;
+        size_t targetW, targetH;
+        if (aspect >= 1.0f) {
+            targetW = MAX_INPUT_SIZE;
+            targetH = (size_t)((float)MAX_INPUT_SIZE / aspect);
+        } else {
+            targetH = MAX_INPUT_SIZE;
+            targetW = (size_t)((float)MAX_INPUT_SIZE * aspect);
+        }
+        
+        printf("Input is large (%zux%zu). Resizing to %zux%zu for baking...\n", 
+               processed.GetMetadata().width, processed.GetMetadata().height, targetW, targetH);
+               
         ScratchImage resized;
         if (SUCCEEDED(Resize(processed.GetImages(), processed.GetImageCount(), processed.GetMetadata(), 
-                             targetSize, targetSize, TEX_FILTER_CUBIC, resized)))
+                             targetW, targetH, TEX_FILTER_CUBIC, resized)))
         {
             processed = std::move(resized);
         }
     }
 
     // MANDATORY: Generate a full mip chain for the source texture if it's missing or after resize.
-    // Filtered importance sampling and irradiance baking require mips for smoothness.
     if (processed.GetMetadata().mipLevels <= 1)
     {
         printf("Generating mipmaps for source %s...\n", isCubemap ? "cubemap" : "texture");
@@ -98,58 +104,51 @@ bool LoadDDSTexture(std::string_view path, Cubemap& cm, bool& isCubemapOut)
         {
             processed = std::move(mips);
         }
-        else
-        {
-            printf("Error: Failed to generate mipmaps for %s.\n", isCubemap ? "cubemap" : "texture");
-            assert(false && "Failed to generate mipmaps");
-            return false;
-        }
     }
 
-    cm.size = (int)processed.GetMetadata().width;
-    cm.mipCount = (int)processed.GetMetadata().mipLevels;
+    td.width = (int)processed.GetMetadata().width;
+    td.height = (int)processed.GetMetadata().height;
+    td.mipCount = (int)processed.GetMetadata().mipLevels;
+    td.numFaces = isCubemap ? CUBEMAP_FACES : 1;
 
-    int numFaces = isCubemap ? CUBEMAP_FACES : 1;
-    int totalFloats = 0;
-    int s = cm.size;
-    for (int m = 0; m < cm.mipCount; ++m)
+    size_t totalFloats = 0;
+    for (int m = 0; m < td.mipCount; ++m)
     {
-        totalFloats += s * s * numFaces * COMPONENTS_PER_PIXEL;
-        s = std::max(1, s / 2);
+        int mipW = std::max(1, td.width >> m);
+        int mipH = std::max(1, td.height >> m);
+        totalFloats += (size_t)mipW * mipH * td.numFaces * COMPONENTS_PER_PIXEL;
     }
-    cm.data.resize(totalFloats);
+    td.data.resize(totalFloats);
 
-    int floatOffset = 0;
-    for (int m = 0; m < cm.mipCount; ++m)
+    size_t floatOffset = 0;
+    for (int m = 0; m < td.mipCount; ++m)
     {
-        int mipSize = std::max(1, cm.size >> m);
-        for (int face = 0; face < numFaces; ++face)
+        int mipW = std::max(1, td.width >> m);
+        int mipH = std::max(1, td.height >> m);
+        for (int face = 0; face < td.numFaces; ++face)
         {
             const Image* img = processed.GetImage(m, face, 0);
-            if (!img) 
-            {
-                printf("Error: Failed to get image for mip %d, face %d\n", m, face);
-                return false;
-            }
-            memcpy(&cm.data[floatOffset], img->pixels, mipSize * mipSize * BYTES_PER_PIXEL);
-            floatOffset += mipSize * mipSize * COMPONENTS_PER_PIXEL;
+            memcpy(&td.data[floatOffset], img->pixels, (size_t)mipW * mipH * BYTES_PER_PIXEL);
+            floatOffset += (size_t)mipW * mipH * COMPONENTS_PER_PIXEL;
         }
     }
 
     return true;
 }
 
-void SaveDDS(std::string_view path, const Cubemap& cm, bool isCubemap)
+void SaveDDS(std::string_view path, const TextureData& td)
 {
     std::filesystem::path p(path);
     std::wstring wpath = p.wstring();
     
+    bool isCubemap = (td.numFaces == 6);
+
     TexMetadata metadata = {};
-    metadata.width = cm.size;
-    metadata.height = cm.size;
+    metadata.width = td.width;
+    metadata.height = td.height;
     metadata.depth = 1;
-    metadata.arraySize = isCubemap ? CUBEMAP_FACES : 1;
-    metadata.mipLevels = cm.mipCount;
+    metadata.arraySize = td.numFaces;
+    metadata.mipLevels = td.mipCount;
     metadata.format = DXGI_FORMAT_R32G32B32A32_FLOAT;
     metadata.dimension = TEX_DIMENSION_TEXTURE2D;
     metadata.miscFlags = isCubemap ? TEX_MISC_TEXTURECUBE : 0;
@@ -158,19 +157,19 @@ void SaveDDS(std::string_view path, const Cubemap& cm, bool isCubemap)
     if (FAILED(image.Initialize(metadata)))
     {
         printf("Error: Failed to initialize ScratchImage for saving.\n");
-        assert(false && "Failed to initialize ScratchImage for saving");
         return;
     }
-    int numFaces = isCubemap ? 6 : 1;
-    int floatOffset = 0;
-    for (int m = 0; m < cm.mipCount; ++m)
+
+    size_t floatOffset = 0;
+    for (int m = 0; m < td.mipCount; ++m)
     {
-        int mipSize = std::max(1, cm.size >> m);
-        for (int face = 0; face < numFaces; ++face)
+        int mipW = std::max(1, td.width >> m);
+        int mipH = std::max(1, td.height >> m);
+        for (int face = 0; face < td.numFaces; ++face)
         {
             const Image* img = image.GetImage(m, face, 0);
-            memcpy(img->pixels, &cm.data[floatOffset], mipSize * mipSize * BYTES_PER_PIXEL);
-            floatOffset += mipSize * mipSize * COMPONENTS_PER_PIXEL;
+            memcpy(img->pixels, &td.data[floatOffset], (size_t)mipW * mipH * BYTES_PER_PIXEL);
+            floatOffset += (size_t)mipW * mipH * COMPONENTS_PER_PIXEL;
         }
     }
 
@@ -181,10 +180,8 @@ void SaveDDS(std::string_view path, const Cubemap& cm, bool isCubemap)
     }
     else
     {
-        // std::cerr << "Warning: Failed to compress to BC6H_UF16. Saving as R32G32B32A32_FLOAT." << std::endl;
-        // SaveToDDSFile(image.GetImages(), image.GetImageCount(), image.GetMetadata(), DDS_FLAGS_NONE, wpath.c_str());
-        printf("Error: Failed to compress to BC6H_UF16.\n");
-        assert(false && "Failed to compress to BC6H_UF16");
+        printf("Warning: Failed to compress to BC6H_UF16. Saving as R32G32B32A32_FLOAT.\n");
+        SaveToDDSFile(image.GetImages(), image.GetImageCount(), image.GetMetadata(), DDS_FLAGS_NONE, wpath.c_str());
     }
 }
 
@@ -241,26 +238,27 @@ int main(int argc, char** argv)
     if (irrSize <= 0) irrSize = DEFAULT_IRR_SIZE;
     if (radSize <= 0) radSize = DEFAULT_RAD_SIZE;
 
-    Cubemap env;
-    bool isCubemap;
-    if (!LoadDDSTexture(inputFile.string(), env, isCubemap))
+    TextureData env;
+    if (!LoadDDSTexture(inputFile.string(), env))
     {
         printf("Failed to load %s\n", inputFile.string().c_str());
         return 1;
     }
 
-    printf("Loaded %s: size %d, mips %d\n", isCubemap ? "cubemap" : "texture", env.size, env.mipCount);
+    printf("Loaded %s: %dx%d, mips %d\n", (env.numFaces == 6) ? "cubemap" : "texture", env.width, env.height, env.mipCount);
 
-    int numFaces = isCubemap ? 6 : 1;
-
-    Cubemap irradiance;
-    irradiance.size = irrSize;
+    TextureData irradiance;
+    irradiance.width = irrSize;
+    irradiance.height = irrSize;
     irradiance.mipCount = 1;
-    irradiance.data.resize(irradiance.size * irradiance.size * numFaces * COMPONENTS_PER_PIXEL);
+    irradiance.numFaces = env.numFaces;
+    irradiance.data.resize((size_t)irradiance.width * irradiance.height * irradiance.numFaces * COMPONENTS_PER_PIXEL);
 
-    Cubemap radiance;
-    radiance.size = radSize;
+    TextureData radiance;
+    radiance.width = radSize;
+    radiance.height = radSize;
     radiance.mipCount = 0;
+    radiance.numFaces = env.numFaces;
     int s = radSize;
     while (s > 0)
     {
@@ -268,20 +266,19 @@ int main(int argc, char** argv)
         s /= 2;
     }
     
-    int totalFloats = 0;
-    s = radSize;
+    size_t totalFloats = 0;
     for (int m = 0; m < radiance.mipCount; ++m)
     {
-        totalFloats += s * s * numFaces * COMPONENTS_PER_PIXEL;
-        s /= 2;
-        if (s == 0) s = 1;
+        int mipW = std::max(1, radiance.width >> m);
+        int mipH = std::max(1, radiance.height >> m);
+        totalFloats += (size_t)mipW * mipH * radiance.numFaces * COMPONENTS_PER_PIXEL;
     }
     radiance.data.resize(totalFloats);
 
     printf("Baking Irradiance...\n");
-    BakeIrradianceCUDA(env, irradiance, numFaces);
+    BakeIrradianceCUDA(env, irradiance);
     printf("Baking Radiance...\n");
-    BakeRadianceCUDA(env, radiance, numFaces);
+    BakeRadianceCUDA(env, radiance);
 
     // Generate output filenames
     std::filesystem::path baseFilename = inputFile;
@@ -293,9 +290,9 @@ int main(int argc, char** argv)
     radOutput += "_radiance.dds";
 
     printf("Saving %s...\n", irrOutput.string().c_str());
-    SaveDDS(irrOutput.string(), irradiance, isCubemap);
+    SaveDDS(irrOutput.string(), irradiance);
     printf("Saving %s...\n", radOutput.string().c_str());
-    SaveDDS(radOutput.string(), radiance, isCubemap);
+    SaveDDS(radOutput.string(), radiance);
 
     printf("Done.\n");
 

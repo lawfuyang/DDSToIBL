@@ -2,12 +2,14 @@
 
 #include <vector>
 
-struct Cubemap
+struct TextureData
 {
-    int size;                 // face width == height
+    int width;
+    int height;
     int mipCount;
+    int numFaces;             // 1 for 2D, 6 for Cubemap
     std::vector<float> data;  // RGBA32F, layout: mip -> face -> y -> x -> rgba
 };
 
-void BakeIrradianceCUDA(const Cubemap& src, Cubemap& dst, int numFaces);
-void BakeRadianceCUDA(const Cubemap& src, Cubemap& dst, int numFaces);
+void BakeIrradianceCUDA(const TextureData& src, TextureData& dst);
+void BakeRadianceCUDA(const TextureData& src, TextureData& dst);
