@@ -219,8 +219,6 @@ int main(int argc, char** argv)
         }
     }
 
-    //inputFile = "D:\\Workspace\\GLTF Scenes\\RTXPT-Assets\\EnvironmentMaps\\simplebluesky.dds";
-
     if (showHelp || inputFile.empty())
     {
         printf("Usage: DDSToIBL <input.dds> [-i irrSize] [-r radSize]\n");
