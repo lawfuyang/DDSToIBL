@@ -100,7 +100,7 @@ __device__ float3 ImportanceSampleGGX(float2 Xi, float roughness, float3 N)
 }
 
 // Global kernels
-__global__ void BakeIrradianceKernel(cudaTextureObject_t envMap, float* dst, int width, int height)
+__global__ void BakeIrradianceKernel(cudaTextureObject_t envMap, float* dst, int width, int height, int sampleCount)
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -118,7 +118,7 @@ __global__ void BakeIrradianceKernel(cudaTextureObject_t envMap, float* dst, int
     float3 right = normalize(cross(up, Ndir));
     up = normalize(cross(Ndir, right));
 
-    float sampleDelta = 0.0025f;
+    float sampleDelta = CUDART_PI_F / sqrtf((float)sampleCount);
     float nrSamples = 0.0f;
     for (float phi = 0.0f; phi < 2.0f * CUDART_PI_F; phi += sampleDelta)
     {
@@ -240,7 +240,7 @@ cudaTextureObject_t CreateTextureCUDA(const TextureData& src, cudaMipmappedArray
     return texObj;
 }
 
-void BakeIrradianceCUDA(const TextureData& src, TextureData& dst)
+void BakeIrradianceCUDA(const TextureData& src, TextureData& dst, int sampleCount)
 {
     cudaMipmappedArray_t envMipArray;
     cudaTextureObject_t envMap = CreateTextureCUDA(src, envMipArray);
@@ -252,7 +252,7 @@ void BakeIrradianceCUDA(const TextureData& src, TextureData& dst)
     dim3 block(BLOCK_SIZE_X, BLOCK_SIZE_Y, 1);
     dim3 grid((dst.width + block.x - 1) / block.x, (dst.height + block.y - 1) / block.y, dst.numFaces);
 
-    BakeIrradianceKernel<<<grid, block>>>(envMap, d_dst, dst.width, dst.height);
+    BakeIrradianceKernel<<<grid, block>>>(envMap, d_dst, dst.width, dst.height, sampleCount);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -263,9 +263,8 @@ void BakeIrradianceCUDA(const TextureData& src, TextureData& dst)
     CUDA_CHECK(cudaFreeMipmappedArray(envMipArray));
 }
 
-void BakeRadianceCUDA(const TextureData& src, TextureData& dst)
+void BakeRadianceCUDA(const TextureData& src, TextureData& dst, int sampleCount)
 {
-    const int sampleCount = 8192;
     cudaMipmappedArray_t envMipArray;
     cudaTextureObject_t envMap = CreateTextureCUDA(src, envMipArray);
 

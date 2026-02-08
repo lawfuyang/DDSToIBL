@@ -11,5 +11,5 @@ struct TextureData
     std::vector<float> data;  // RGBA32F, layout: mip -> face -> y -> x -> rgba
 };
 
-void BakeIrradianceCUDA(const TextureData& src, TextureData& dst);
-void BakeRadianceCUDA(const TextureData& src, TextureData& dst);
+void BakeIrradianceCUDA(const TextureData& src, TextureData& dst, int sampleCount);
+void BakeRadianceCUDA(const TextureData& src, TextureData& dst, int sampleCount);

@@ -18,6 +18,8 @@ const int BYTES_PER_PIXEL = COMPONENTS_PER_PIXEL * BYTES_PER_FLOAT; // 16
 const int CUBEMAP_FACES = 6;
 const int DEFAULT_IRR_SIZE = 64;
 const int DEFAULT_RAD_SIZE = 256;
+const int DEFAULT_IRR_SAMPLES = 1024;
+const int DEFAULT_RAD_SAMPLES = 8192;
 const int MAX_INPUT_SIZE = 1024;
 
 XMVECTOR FaceUVToDir(int face, float u, float v)
@@ -281,14 +283,34 @@ int main(int argc, char** argv)
 {
     std::filesystem::path inputFile;
     bool showHelp = false;
+    int irrSize = DEFAULT_IRR_SIZE;
+    int radSize = DEFAULT_RAD_SIZE;
+    int irrSamples = DEFAULT_IRR_SAMPLES;
+    int radSamples = DEFAULT_RAD_SAMPLES;
 
     for (int i = 1; i < argc; ++i)
     {
         std::string arg = argv[i];
-        if (arg == "--help")
+        if (arg == "--help" || arg == "-h")
         {
             showHelp = true;
             break;
+        }
+        else if (arg == "-i" && i + 1 < argc)
+        {
+            irrSize = std::atoi(argv[++i]);
+        }
+        else if (arg == "-r" && i + 1 < argc)
+        {
+            radSize = std::atoi(argv[++i]);
+        }
+        else if (arg == "-s" && i + 1 < argc)
+        {
+            irrSamples = std::atoi(argv[++i]);
+        }
+        else if (arg == "-m" && i + 1 < argc)
+        {
+            radSamples = std::atoi(argv[++i]);
         }
         else if (inputFile.empty())
         {
@@ -303,15 +325,21 @@ int main(int argc, char** argv)
 
     if (showHelp || inputFile.empty())
     {
-        printf("Usage: DDSToIBL <input.dds>\n");
+        printf("Usage: DDSToIBL <input.dds> [options]\n");
         printf("Convert DDS cubemap or 2D (equirectangular) texture to IBL irradiance and radiance cubemaps.\n");
         printf("Supported formats: All DDS formats including BC6H (via DirectXTex).\n");
         printf("Baking is performed on CUDA.\n");
-        printf("Irradiance cubemap face size: %u\n", DEFAULT_IRR_SIZE);
-        printf("Radiance cubemap face size: %u\n", DEFAULT_RAD_SIZE);
+        printf("Default irradiance cubemap face size: %u\n", DEFAULT_IRR_SIZE);
+        printf("Default radiance cubemap face size: %u\n", DEFAULT_RAD_SIZE);
+        printf("Default irradiance samples: %u\n", DEFAULT_IRR_SAMPLES);
+        printf("Default radiance samples: %u\n", DEFAULT_RAD_SAMPLES);
         printf("\n");
         printf("Options:\n");
-        printf("  --help           Show this help message\n");
+        printf("  -h, --help             Show this help message\n");
+        printf("  -i <size>              Irradiance cubemap face size (default: %u)\n", DEFAULT_IRR_SIZE);
+        printf("  -r <size>              Radiance cubemap face size (default: %u)\n", DEFAULT_RAD_SIZE);
+        printf("  -s <count>             Number of samples for irradiance baking (default: %u)\n", DEFAULT_IRR_SAMPLES);
+        printf("  -m <count>             Number of samples for radiance baking (default: %u)\n", DEFAULT_RAD_SAMPLES);
         return showHelp ? 0 : 1;
     }
 
@@ -325,18 +353,18 @@ int main(int argc, char** argv)
     printf("Loaded %s: %dx%d, mips %d\n", (env.numFaces == 6) ? "cubemap" : "texture", env.width, env.height, env.mipCount);
 
     TextureData irradiance;
-    irradiance.width = DEFAULT_IRR_SIZE;
-    irradiance.height = DEFAULT_IRR_SIZE;
+    irradiance.width = irrSize;
+    irradiance.height = irrSize;
     irradiance.mipCount = 1;
     irradiance.numFaces = env.numFaces;
     irradiance.data.resize((size_t)irradiance.width * irradiance.height * irradiance.numFaces * COMPONENTS_PER_PIXEL);
 
     TextureData radiance;
-    radiance.width = DEFAULT_RAD_SIZE;
-    radiance.height = DEFAULT_RAD_SIZE;
+    radiance.width = radSize;
+    radiance.height = radSize;
     radiance.mipCount = 0;
     radiance.numFaces = env.numFaces;
-    int s = DEFAULT_RAD_SIZE;
+    int s = radSize;
     while (s > 0)
     {
         radiance.mipCount++;
@@ -352,10 +380,10 @@ int main(int argc, char** argv)
     }
     radiance.data.resize(totalFloats);
 
-    printf("Baking Irradiance...\n");
-    BakeIrradianceCUDA(env, irradiance);
-    printf("Baking Radiance...\n");
-    BakeRadianceCUDA(env, radiance);
+    printf("Baking Irradiance (%dx%d, %d samples)...\n", irrSize, irrSize, irrSamples);
+    BakeIrradianceCUDA(env, irradiance, irrSamples);
+    printf("Baking Radiance (%dx%d, %d samples)...\n", radSize, radSize, radSamples);
+    BakeRadianceCUDA(env, radiance, radSamples);
 
     // Generate output filenames
     std::filesystem::path baseFilename = inputFile;
