@@ -22,7 +22,8 @@ DDSToIBL <input.dds> [-i irrSize] [-r radSize]
 
 ## Dependencies
 
-- DirectXTex (as a submodule)
+- [DirectXTex](https://github.com/microsoft/DirectXTex) (as a submodule)
+- [CUDA](https://developer.nvidia.com/cuda-toolkit)
 
 ## Supported Input Formats
 
