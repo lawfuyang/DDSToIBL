@@ -194,21 +194,53 @@ __global__ void BakeRadianceKernel(cudaTextureObject_t envMap, float* dst, int w
     dst[pixelOffset + 3] = 1.0f;
 }
 
-// Helper to create a texture object from TextureData struct (strictly Cubemap)
-cudaTextureObject_t CreateTextureCUDA(const TextureData& src, cudaMipmappedArray_t& mipArray)
+// Helper to find the best matching mip level in src that is at least as big as targetW x targetH
+int FindBestMip(const TextureData& src, int targetW, int targetH)
 {
-    cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float4>();
-    
-    cudaExtent extent = make_cudaExtent(src.width, src.height, CUBEMAP_FACES_CUDA);
-    unsigned int flags = cudaArrayCubemap;
-    
-    CUDA_CHECK(cudaMallocMipmappedArray(&mipArray, &channelDesc, extent, src.mipCount, flags));
-
-    size_t floatOffset = 0;
+    int bestMip = 0;
     for (int m = 0; m < src.mipCount; ++m)
     {
-        int mipW = std::max(1, src.width >> m);
-        int mipH = std::max(1, src.height >> m);
+        int mw = std::max(1, src.width >> m);
+        int mh = std::max(1, src.height >> m);
+        if (mw >= targetW && mh >= targetH)
+        {
+            bestMip = m;
+        }
+        else
+        {
+            break;
+        }
+    }
+    return bestMip;
+}
+
+// Helper to create a texture object from TextureData struct starting from baseMip (strictly Cubemap)
+cudaTextureObject_t CreateTextureCUDA(const TextureData& src, int baseMip, cudaMipmappedArray_t& mipArray)
+{
+    int startW = std::max(1, src.width >> baseMip);
+    int startH = std::max(1, src.height >> baseMip);
+    int startMipCount = src.mipCount - baseMip;
+
+    cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float4>();
+    
+    cudaExtent extent = make_cudaExtent(startW, startH, CUBEMAP_FACES_CUDA);
+    unsigned int flags = cudaArrayCubemap;
+    
+    CUDA_CHECK(cudaMallocMipmappedArray(&mipArray, &channelDesc, extent, startMipCount, flags));
+
+    // Calculate initial float offset to the start of baseMip
+    size_t floatOffset = 0;
+    for (int m = 0; m < baseMip; ++m)
+    {
+        int mw = std::max(1, src.width >> m);
+        int mh = std::max(1, src.height >> m);
+        floatOffset += (size_t)mw * mh * CUBEMAP_FACES_CUDA * COMPONENTS_PER_PIXEL_CUDA;
+    }
+
+    for (int m = 0; m < startMipCount; ++m)
+    {
+        int mipW = std::max(1, startW >> m);
+        int mipH = std::max(1, startH >> m);
         cudaArray_t levelArray;
         CUDA_CHECK(cudaGetMipmappedArrayLevel(&levelArray, mipArray, m));
 
@@ -242,8 +274,10 @@ cudaTextureObject_t CreateTextureCUDA(const TextureData& src, cudaMipmappedArray
 
 void BakeIrradianceCUDA(const TextureData& src, TextureData& dst, int sampleCount)
 {
+    int baseMip = FindBestMip(src, dst.width, dst.height);
+    
     cudaMipmappedArray_t envMipArray;
-    cudaTextureObject_t envMap = CreateTextureCUDA(src, envMipArray);
+    cudaTextureObject_t envMap = CreateTextureCUDA(src, baseMip, envMipArray);
 
     float* d_dst;
     size_t dstSize = (size_t)dst.width * dst.height * dst.numFaces * COMPONENTS_PER_PIXEL_CUDA * sizeof(float);
@@ -265,9 +299,6 @@ void BakeIrradianceCUDA(const TextureData& src, TextureData& dst, int sampleCoun
 
 void BakeRadianceCUDA(const TextureData& src, TextureData& dst, int sampleCount)
 {
-    cudaMipmappedArray_t envMipArray;
-    cudaTextureObject_t envMap = CreateTextureCUDA(src, envMipArray);
-
     float* d_dst;
     size_t totalBytes = dst.data.size() * sizeof(float);
     CUDA_CHECK(cudaMalloc(&d_dst, totalBytes));
@@ -278,12 +309,22 @@ void BakeRadianceCUDA(const TextureData& src, TextureData& dst, int sampleCount)
         int mipW = std::max(1, dst.width >> mip);
         int mipH = std::max(1, dst.height >> mip);
         
+        int baseMip = FindBestMip(src, mipW, mipH);
+        int startW = std::max(1, src.width >> baseMip);
+        int startH = std::max(1, src.height >> baseMip);
+
+        cudaMipmappedArray_t envMipArray;
+        cudaTextureObject_t envMap = CreateTextureCUDA(src, baseMip, envMipArray);
+
         dim3 block(BLOCK_SIZE_X, BLOCK_SIZE_Y, 1);
         dim3 grid((mipW + block.x - 1) / block.x, (mipH + block.y - 1) / block.y, dst.numFaces);
 
-        BakeRadianceKernel<<<grid, block>>>(envMap, d_dst + offset, mipW, mipH, mip, dst.mipCount, sampleCount, (float)src.width, (float)src.height);
+        BakeRadianceKernel<<<grid, block>>>(envMap, d_dst + offset, mipW, mipH, mip, dst.mipCount, sampleCount, (float)startW, (float)startH);
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
+
+        CUDA_CHECK(cudaDestroyTextureObject(envMap));
+        CUDA_CHECK(cudaFreeMipmappedArray(envMipArray));
 
         offset += (size_t)mipW * mipH * dst.numFaces * 4;
     }
@@ -291,6 +332,4 @@ void BakeRadianceCUDA(const TextureData& src, TextureData& dst, int sampleCount)
     CUDA_CHECK(cudaMemcpy(dst.data.data(), d_dst, totalBytes, cudaMemcpyDeviceToHost));
 
     CUDA_CHECK(cudaFree(d_dst));
-    CUDA_CHECK(cudaDestroyTextureObject(envMap));
-    CUDA_CHECK(cudaFreeMipmappedArray(envMipArray));
 }

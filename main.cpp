@@ -132,7 +132,7 @@ bool LoadDDSTexture(std::string_view path, TextureData& td)
     }
     else if (metadata.format != DXGI_FORMAT_R32G32B32A32_FLOAT)
     {
-        if (FAILED(Convert(image.GetImages(), image.GetImageCount(), metadata, DXGI_FORMAT_R32G32B32A32_FLOAT, TEX_FILTER_DEFAULT, TEX_THRESHOLD_DEFAULT, processed)))
+        if (FAILED(Convert(image.GetImages(), image.GetImageCount(), metadata, DXGI_FORMAT_R32G32B32A32_FLOAT, TEX_FILTER_LINEAR, TEX_THRESHOLD_DEFAULT, processed)))
         {
             printf("Error: Failed to convert DDS file.\n");
             assert(false && "Failed to convert DDS file");
@@ -165,7 +165,7 @@ bool LoadDDSTexture(std::string_view path, TextureData& td)
 
         ScratchImage resized;
         if (SUCCEEDED(Resize(processed.GetImages(), processed.GetImageCount(), processed.GetMetadata(),
-            targetW, targetH, TEX_FILTER_CUBIC, resized)))
+            targetW, targetH, TEX_FILTER_LINEAR, resized)))
         {
             processed = std::move(resized);
         }
@@ -188,15 +188,20 @@ bool LoadDDSTexture(std::string_view path, TextureData& td)
         }
     }
 
-    // MANDATORY: Generate a full mip chain for the source texture if it's missing or after resize.
+    // Generate a full mip chain for the source texture if it's missing or after resize.
     if (processed.GetMetadata().mipLevels <= 1)
     {
         printf("Generating mipmaps for source texture...\n");
         ScratchImage mips;
-        if (SUCCEEDED(GenerateMipMaps(processed.GetImages(), processed.GetImageCount(), processed.GetMetadata(), 
-                                     TEX_FILTER_DEFAULT, 0, mips)))
+        if (SUCCEEDED(GenerateMipMaps(processed.GetImages(), processed.GetImageCount(), processed.GetMetadata(), TEX_FILTER_LINEAR, 0, mips)))
         {
             processed = std::move(mips);
+        }
+        else
+        {
+            printf("Error: Failed to generate mipmaps.\n");
+            assert(false && "Failed to generate mipmaps");
+            return false;
         }
     }
 
