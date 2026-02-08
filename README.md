@@ -5,7 +5,7 @@ A small, minimal C++ application that generates radiance and irradiance DDS cube
 ## Usage
 
 ```
-DDSToIBL <input.dds> [-i irrSize] [-r radSize]
+DDSToIBL <input.dds>
 ```
 
 ### Inputs
@@ -14,6 +14,8 @@ DDSToIBL <input.dds> [-i irrSize] [-r radSize]
 ### Outputs
 - **<input>_irradiance.dds**: Irradiance cubemap (compressed to BC6H_UF16)
 - **<input>_radiance.dds**: Radiance cubemap with full mip chain (compressed to BC6H_UF16)
+
+Note: Output sizes are 64×64 pixels per face for radiance maps and 256×256 pixels per face for irradiance maps.
 
 ### Options
 - `--help`: Show help message
