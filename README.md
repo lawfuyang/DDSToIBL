@@ -16,8 +16,6 @@ DDSToIBL <input.dds> [-i irrSize] [-r radSize]
 - **<input>_radiance.dds**: Radiance cubemap with full mip chain (compressed to BC6H_UF16)
 
 ### Options
-- `-i irrSize`: Irradiance map size (default 64 for cubemaps, input size for 2D textures)
-- `-r radSize`: Radiance map size (default 256 for cubemaps, input size for 2D textures)
 - `--help`: Show help message
 
 ## Baking Details
