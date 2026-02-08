@@ -118,7 +118,7 @@ __global__ void BakeIrradianceKernel(cudaTextureObject_t envMap, float* dst, int
     float3 right = normalize(cross(up, Ndir));
     up = normalize(cross(Ndir, right));
 
-    float sampleDelta = CUDART_PI_F / sqrtf((float)sampleCount);
+    float sampleDelta = (2.0f * CUDART_PI_F) / sampleCount;
     float nrSamples = 0.0f;
     for (float phi = 0.0f; phi < 2.0f * CUDART_PI_F; phi += sampleDelta)
     {
