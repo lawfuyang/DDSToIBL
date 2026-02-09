@@ -22,7 +22,7 @@ Note: Output sizes are 64×64 pixels per face for radiance maps and 256×256 pix
 
 ## Baking Details
 
-- Radiance baking: ~1000 samples per texel
+- Radiance baking: 1024 samples per texel
 - Irradiance baking: 8196 samples per texel
 
 ## Dependencies

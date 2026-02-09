@@ -4,6 +4,9 @@
 #include <cstring>
 #include <filesystem>
 #include <string_view>
+#include <fstream>
+#include <cstdint>
+#include <chrono>
 
 #include "bake_ibl.h"
 
@@ -21,6 +24,28 @@ const int DEFAULT_RAD_SIZE = 256;
 const int DEFAULT_IRR_SAMPLES = 1024;
 const int DEFAULT_RAD_SAMPLES = 8192;
 const int MAX_INPUT_SIZE = 1024;
+
+char* HRESULT_To_String(const HRESULT hr)
+{
+    static char buffer[512];
+    DWORD code = HRESULT_CODE(hr); // Extract Win32 error code
+
+    if (FormatMessage(
+        FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        NULL,
+        code,
+        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+        buffer,
+        sizeof(buffer),
+        NULL
+    ) == 0)
+    {
+        // Fallback if FormatMessage fails
+        sprintf_s(buffer, sizeof(buffer), "Unknown error code: 0x%08X", hr);
+    }
+
+    return buffer;
+}
 
 XMVECTOR FaceUVToDir(int face, float u, float v)
 {
@@ -56,7 +81,12 @@ ScratchImage ConvertEquirectangularToCubemap(const ScratchImage& equirect)
     cubeMeta.miscFlags = TEX_MISC_TEXTURECUBE;
 
     ScratchImage cube;
-    if (FAILED(cube.Initialize(cubeMeta))) return {};
+    if (HRESULT result = cube.Initialize(cubeMeta);
+        FAILED(result))
+    {
+        printf("Error: Failed to initialize ScratchImage. %s\n", HRESULT_To_String(result));
+        return {};
+    }
 
     const Image* eqImg = equirect.GetImage(0, 0, 0);
 
@@ -104,9 +134,10 @@ bool LoadDDSTexture(std::string_view path, TextureData& td)
 
     printf("Loading DDS file: %.*s\n", (int)path.size(), path.data());
 
-    if (FAILED(LoadFromDDSFile(wpath.c_str(), DDS_FLAGS_NONE, &metadata, image)))
+    if (HRESULT result = LoadFromDDSFile(wpath.c_str(), DDS_FLAGS_NONE, &metadata, image);
+        FAILED(result))
     {
-        printf("Error: Failed to load DDS file.\n");
+        printf("Error: Failed to load DDS file. %s\n", HRESULT_To_String(result));
         assert(false && "Failed to load DDS file");
         return false;
     }
@@ -121,20 +152,23 @@ bool LoadDDSTexture(std::string_view path, TextureData& td)
     }
 
     ScratchImage processed;
+
     if (IsCompressed(metadata.format))
     {
-        if (FAILED(Decompress(image.GetImages(), image.GetImageCount(), metadata, DXGI_FORMAT_R32G32B32A32_FLOAT, processed)))
+        if (HRESULT result = Decompress(image.GetImages(), image.GetImageCount(), metadata, DXGI_FORMAT_R32G32B32A32_FLOAT, processed);
+            FAILED(result))
         {
-            printf("Error: Failed to decompress DDS file.\n");
+            printf("Error: Failed to decompress DDS file. %s\n", HRESULT_To_String(result));
             assert(false && "Failed to decompress DDS file");
             return false;
         }
     }
     else if (metadata.format != DXGI_FORMAT_R32G32B32A32_FLOAT)
     {
-        if (FAILED(Convert(image.GetImages(), image.GetImageCount(), metadata, DXGI_FORMAT_R32G32B32A32_FLOAT, TEX_FILTER_LINEAR, TEX_THRESHOLD_DEFAULT, processed)))
+        if (HRESULT result = Convert(image.GetImages(), image.GetImageCount(), metadata, DXGI_FORMAT_R32G32B32A32_FLOAT, TEX_FILTER_LINEAR, TEX_THRESHOLD_DEFAULT, processed);
+            FAILED(result))
         {
-            printf("Error: Failed to convert DDS file.\n");
+            printf("Error: Failed to convert DDS file. %s\n", HRESULT_To_String(result));
             assert(false && "Failed to convert DDS file");
             return false;
         }
@@ -286,6 +320,8 @@ void SaveDDS(std::string_view path, const TextureData& td)
 
 int main(int argc, char** argv)
 {
+    auto start = std::chrono::high_resolution_clock::now();
+
     std::filesystem::path inputFile;
     bool showHelp = false;
     int irrSize = DEFAULT_IRR_SIZE;
@@ -405,6 +441,12 @@ int main(int argc, char** argv)
     SaveDDS(radOutput.string(), radiance);
 
     printf("Done.\n");
+
+    auto end = std::chrono::high_resolution_clock::now();
+
+    std::chrono::duration<double> elapsed = end - start;
+
+    printf("Total runtime: %.2f seconds\n", elapsed.count());
 
     return 0;
 }
