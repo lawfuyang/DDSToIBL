@@ -7,6 +7,7 @@
 #include <fstream>
 #include <cstdint>
 #include <chrono>
+#include <cstdlib>
 
 #include "bake_ibl.h"
 
@@ -23,6 +24,8 @@ const int DEFAULT_IRR_SIZE = 64;
 const int DEFAULT_RAD_SIZE = 256;
 const int DEFAULT_IRR_SAMPLES = 1024;
 const int DEFAULT_RAD_SAMPLES = 8192;
+const int DEFAULT_BRDF_SAMPLES = 1024;
+const int DEFAULT_BRDF_SIZE = 256;
 const int MAX_INPUT_SIZE = 1024;
 
 char* HRESULT_To_String(const HRESULT hr)
@@ -269,7 +272,7 @@ bool LoadDDSTexture(std::string_view path, TextureData& td)
     return true;
 }
 
-void SaveDDS(std::string_view path, const TextureData& td)
+void SaveDDS(std::string_view path, const TextureData& td, DXGI_FORMAT targetFormat = DXGI_FORMAT_UNKNOWN)
 {
     std::filesystem::path p(path);
     std::wstring wpath = p.wstring();
@@ -306,21 +309,40 @@ void SaveDDS(std::string_view path, const TextureData& td)
         }
     }
 
-    ScratchImage compressed;
-    if (SUCCEEDED(Compress(image.GetImages(), image.GetImageCount(), image.GetMetadata(), DXGI_FORMAT_BC6H_UF16, TEX_COMPRESS_PARALLEL, TEX_THRESHOLD_DEFAULT, compressed)))
+    if (targetFormat != DXGI_FORMAT_UNKNOWN)
     {
-        SaveToDDSFile(compressed.GetImages(), compressed.GetImageCount(), compressed.GetMetadata(), DDS_FLAGS_NONE, wpath.c_str());
+        ScratchImage converted;
+        if (SUCCEEDED(Convert(image.GetImages(), image.GetImageCount(), image.GetMetadata(), targetFormat, TEX_FILTER_DEFAULT, TEX_THRESHOLD_DEFAULT, converted)))
+        {
+            SaveToDDSFile(converted.GetImages(), converted.GetImageCount(), converted.GetMetadata(), DDS_FLAGS_NONE, wpath.c_str());
+            return;
+        }
+        else
+        {
+            printf("Warning: Failed to convert to requested format %d. Falling back to default.\n", (int)targetFormat);
+        }
+    }
+
+    ScratchImage processed;
+    if (isCubemap && SUCCEEDED(Compress(image.GetImages(), image.GetImageCount(), image.GetMetadata(), DXGI_FORMAT_BC6H_UF16, TEX_COMPRESS_PARALLEL, TEX_THRESHOLD_DEFAULT, processed)))
+    {
+        SaveToDDSFile(processed.GetImages(), processed.GetImageCount(), processed.GetMetadata(), DDS_FLAGS_NONE, wpath.c_str());
     }
     else
     {
-        printf("Warning: Failed to compress to BC6H_UF16. Saving as R32G32B32A32_FLOAT.\n");
+        if (isCubemap) printf("Warning: Failed to compress to BC6H_UF16. Saving as R32G32B32A32_FLOAT.\n");
         SaveToDDSFile(image.GetImages(), image.GetImageCount(), image.GetMetadata(), DDS_FLAGS_NONE, wpath.c_str());
     }
 }
 
 int main(int argc, char** argv)
 {
-    auto start = std::chrono::high_resolution_clock::now();
+    // Check for CUDA toolkit
+    if (system("nvcc --version >nul 2>&1") != 0)
+    {
+        printf("Error: CUDA toolkit not found. Please install CUDA and ensure nvcc is in PATH.\n");
+        return 1;
+    }
 
     std::filesystem::path inputFile;
     bool showHelp = false;
@@ -328,6 +350,10 @@ int main(int argc, char** argv)
     int radSize = DEFAULT_RAD_SIZE;
     int irrSamples = DEFAULT_IRR_SAMPLES;
     int radSamples = DEFAULT_RAD_SAMPLES;
+    bool bakeBrdf = false;
+    int brdfSize = DEFAULT_BRDF_SIZE;
+    int brdfSamples = DEFAULT_BRDF_SAMPLES;
+    bool brdfOnly = false;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -353,6 +379,23 @@ int main(int argc, char** argv)
         {
             radSamples = std::atoi(argv[++i]);
         }
+        else if ((arg == "-b" || arg == "--brdf"))
+        {
+            bakeBrdf = true;
+        }
+        else if (arg == "--brdf-only")
+        {
+            bakeBrdf = true;
+            brdfOnly = true;
+        }
+        else if (arg == "-l" && i + 1 < argc)
+        {
+            brdfSize = std::atoi(argv[++i]);
+        }
+        else if (arg == "-n" && i + 1 < argc)
+        {
+            brdfSamples = std::atoi(argv[++i]);
+        }
         else if (inputFile.empty())
         {
             inputFile = std::filesystem::path(argv[i]);
@@ -364,7 +407,7 @@ int main(int argc, char** argv)
         }
     }
 
-    if (showHelp || inputFile.empty())
+    if (showHelp || (inputFile.empty() && !bakeBrdf))
     {
         printf("Usage: DDSToIBL <input.dds> [options]\n");
         printf("Convert DDS cubemap or 2D (equirectangular) texture to IBL irradiance and radiance cubemaps.\n");
@@ -374,6 +417,7 @@ int main(int argc, char** argv)
         printf("Default radiance cubemap face size: %u\n", DEFAULT_RAD_SIZE);
         printf("Default irradiance samples: %u\n", DEFAULT_IRR_SAMPLES);
         printf("Default radiance samples: %u\n", DEFAULT_RAD_SAMPLES);
+        printf("Default BRDF samples: %u\n", DEFAULT_BRDF_SAMPLES);
         printf("\n");
         printf("Options:\n");
         printf("  -h, --help             Show this help message\n");
@@ -381,64 +425,89 @@ int main(int argc, char** argv)
         printf("  -r <size>              Radiance cubemap face size (default: %u)\n", DEFAULT_RAD_SIZE);
         printf("  -s <count>             Number of samples for irradiance baking (default: %u)\n", DEFAULT_IRR_SAMPLES);
         printf("  -m <count>             Number of samples for radiance baking (default: %u)\n", DEFAULT_RAD_SAMPLES);
+        printf("  -b, --brdf             Bake BRDF LUT\n");
+        printf("  -l <size>              BRDF LUT size (default: %u)\n", DEFAULT_BRDF_SIZE);
+        printf("  -n <count>             Number of samples for BRDF LUT baking (default: %u)\n", DEFAULT_BRDF_SAMPLES);
+        printf("  --brdf-only            Only bake BRDF LUT (ignores input texture)\n");
         return showHelp ? 0 : 1;
     }
 
-    TextureData env;
-    if (!LoadDDSTexture(inputFile.string(), env))
+    auto start = std::chrono::high_resolution_clock::now();
+
+    if (!brdfOnly && !inputFile.empty())
     {
-        printf("Failed to load %s\n", inputFile.string().c_str());
-        return 1;
+        TextureData env;
+        if (!LoadDDSTexture(inputFile.string(), env))
+        {
+            printf("Failed to load %s\n", inputFile.string().c_str());
+            return 1;
+        }
+
+        printf("Loaded %s: %dx%d, mips %d\n", (env.numFaces == 6) ? "cubemap" : "texture", env.width, env.height, env.mipCount);
+
+        TextureData irradiance;
+        irradiance.width = irrSize;
+        irradiance.height = irrSize;
+        irradiance.mipCount = 1;
+        irradiance.numFaces = env.numFaces;
+        irradiance.data.resize((size_t)irradiance.width * irradiance.height * irradiance.numFaces * COMPONENTS_PER_PIXEL);
+
+        TextureData radiance;
+        radiance.width = radSize;
+        radiance.height = radSize;
+        radiance.mipCount = 0;
+        radiance.numFaces = env.numFaces;
+        int s = radSize;
+        while (s > 0)
+        {
+            radiance.mipCount++;
+            s /= 2;
+        }
+
+        size_t totalFloats = 0;
+        for (int m = 0; m < radiance.mipCount; ++m)
+        {
+            int mipW = std::max(1, radiance.width >> m);
+            int mipH = std::max(1, radiance.height >> m);
+            totalFloats += (size_t)mipW * mipH * radiance.numFaces * COMPONENTS_PER_PIXEL;
+        }
+        radiance.data.resize(totalFloats);
+
+        printf("Baking Irradiance (%dx%d, %d samples)...\n", irrSize, irrSize, irrSamples);
+        BakeIrradianceCUDA(env, irradiance, irrSamples);
+        printf("Baking Radiance (%dx%d, %d samples)...\n", radSize, radSize, radSamples);
+        BakeRadianceCUDA(env, radiance, radSamples);
+
+        // Generate output filenames
+        std::filesystem::path baseFilename = inputFile;
+        baseFilename.replace_extension("");
+
+        std::filesystem::path irrOutput = baseFilename;
+        irrOutput += "_irradiance.dds";
+        std::filesystem::path radOutput = baseFilename;
+        radOutput += "_radiance.dds";
+
+        printf("Saving %s...\n", irrOutput.string().c_str());
+        SaveDDS(irrOutput.string(), irradiance);
+        printf("Saving %s...\n", radOutput.string().c_str());
+        SaveDDS(radOutput.string(), radiance);
     }
 
-    printf("Loaded %s: %dx%d, mips %d\n", (env.numFaces == 6) ? "cubemap" : "texture", env.width, env.height, env.mipCount);
-
-    TextureData irradiance;
-    irradiance.width = irrSize;
-    irradiance.height = irrSize;
-    irradiance.mipCount = 1;
-    irradiance.numFaces = env.numFaces;
-    irradiance.data.resize((size_t)irradiance.width * irradiance.height * irradiance.numFaces * COMPONENTS_PER_PIXEL);
-
-    TextureData radiance;
-    radiance.width = radSize;
-    radiance.height = radSize;
-    radiance.mipCount = 0;
-    radiance.numFaces = env.numFaces;
-    int s = radSize;
-    while (s > 0)
+    if (bakeBrdf)
     {
-        radiance.mipCount++;
-        s /= 2;
+        TextureData brdf;
+        brdf.width = brdfSize;
+        brdf.height = brdfSize;
+        brdf.mipCount = 1;
+        brdf.numFaces = 1;
+        brdf.data.resize((size_t)brdf.width * brdf.height * COMPONENTS_PER_PIXEL);
+        printf("Baking BRDF LUT (%dx%d, %d samples)...\n", brdfSize, brdfSize, brdfSamples);
+        BakeBRDFLUT_CUDA(brdf, brdfSamples);
+
+        std::filesystem::path brdfOutput = inputFile.empty() ? "brdf_lut.dds" : inputFile.parent_path() / "brdf_lut.dds";
+        printf("Saving %s...\n", brdfOutput.string().c_str());
+        SaveDDS(brdfOutput.string(), brdf, DXGI_FORMAT_R16G16_FLOAT);
     }
-    
-    size_t totalFloats = 0;
-    for (int m = 0; m < radiance.mipCount; ++m)
-    {
-        int mipW = std::max(1, radiance.width >> m);
-        int mipH = std::max(1, radiance.height >> m);
-        totalFloats += (size_t)mipW * mipH * radiance.numFaces * COMPONENTS_PER_PIXEL;
-    }
-    radiance.data.resize(totalFloats);
-
-    printf("Baking Irradiance (%dx%d, %d samples)...\n", irrSize, irrSize, irrSamples);
-    BakeIrradianceCUDA(env, irradiance, irrSamples);
-    printf("Baking Radiance (%dx%d, %d samples)...\n", radSize, radSize, radSamples);
-    BakeRadianceCUDA(env, radiance, radSamples);
-
-    // Generate output filenames
-    std::filesystem::path baseFilename = inputFile;
-    baseFilename.replace_extension("");
-
-    std::filesystem::path irrOutput = baseFilename;
-    irrOutput += "_irradiance.dds";
-    std::filesystem::path radOutput = baseFilename;
-    radOutput += "_radiance.dds";
-
-    printf("Saving %s...\n", irrOutput.string().c_str());
-    SaveDDS(irrOutput.string(), irradiance);
-    printf("Saving %s...\n", radOutput.string().c_str());
-    SaveDDS(radOutput.string(), radiance);
 
     printf("Done.\n");
 

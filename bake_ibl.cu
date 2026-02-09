@@ -99,6 +99,25 @@ __device__ float3 ImportanceSampleGGX(float2 Xi, float roughness, float3 N)
     return normalize(T * H.x + B * H.y + N * H.z);
 }
 
+__device__ float GeometrySchlickGGX(float NdotV, float roughness)
+{
+	float a = roughness;
+	float k = (a * a) / 2.0f;
+
+	float nom = NdotV;
+	float denom = NdotV * (1.0f - k) + k;
+
+	return nom / denom;
+}
+
+__device__ float GeometrySmith(float roughness, float NoV, float NoL)
+{
+	float ggx2 = GeometrySchlickGGX(NoV, roughness);
+	float ggx1 = GeometrySchlickGGX(NoL, roughness);
+
+	return ggx1 * ggx2;
+}
+
 // Global kernels
 __global__ void BakeIrradianceKernel(cudaTextureObject_t envMap, float* dst, int width, int height, int sampleCount)
 {
@@ -191,6 +210,59 @@ __global__ void BakeRadianceKernel(cudaTextureObject_t envMap, float* dst, int w
     dst[pixelOffset + 0] = prefilteredColor.x;
     dst[pixelOffset + 1] = prefilteredColor.y;
     dst[pixelOffset + 2] = prefilteredColor.z;
+    dst[pixelOffset + 3] = 1.0f;
+}
+
+__global__ void BakeBRDFLUTKernel(float* dst, int width, int height, int sampleCount)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= width || y >= height) return;
+
+    float NdotV = (x + 0.5f) / (float)width;
+    float roughness = 1.0f - (y + 0.5f) / (float)height;
+
+    // Small epsilon to avoid artifacts at 0
+    NdotV = fmaxf(NdotV, 0.001f);
+
+    float3 V;
+    V.x = sqrtf(1.0f - NdotV * NdotV);
+    V.y = 0.0f;
+    V.z = NdotV;
+
+    float A = 0.0f;
+    float B = 0.0f;
+
+    float3 N = make_float3(0, 0, 1);
+
+    for (uint32_t i = 0u; i < sampleCount; ++i)
+    {
+        float2 Xi = Hammersley(i, sampleCount);
+        float3 H = ImportanceSampleGGX(Xi, roughness, N);
+        float3 L = normalize(2.0f * dot(V, H) * H - V);
+
+        float NoL = fmaxf(L.z, 0.0f);
+        float NoH = fmaxf(H.z, 0.0f);
+        float VoH = fmaxf(dot(V, H), 0.0f);
+        float NoV = fmaxf(dot(N, V), 0.0f);
+
+        if (NoL > 0.0f)
+        {
+            float G = GeometrySmith(roughness, NoV, NoL);
+
+            float G_Vis = (G * VoH) / (NoH * NoV);
+            float Fc = powf(1.0f - VoH, 5.0f);
+
+            A += (1.0f - Fc) * G_Vis;
+            B += Fc * G_Vis;
+        }
+    }
+
+    int pixelOffset = (y * width + x) * 4;
+    dst[pixelOffset + 0] = A / (float)sampleCount;
+    dst[pixelOffset + 1] = B / (float)sampleCount;
+    dst[pixelOffset + 2] = 0.0f; // Could be used for something else, but standard is RG16 or similar
     dst[pixelOffset + 3] = 1.0f;
 }
 
@@ -330,6 +402,24 @@ void BakeRadianceCUDA(const TextureData& src, TextureData& dst, int sampleCount)
     }
 
     CUDA_CHECK(cudaMemcpy(dst.data.data(), d_dst, totalBytes, cudaMemcpyDeviceToHost));
+
+    CUDA_CHECK(cudaFree(d_dst));
+}
+
+void BakeBRDFLUT_CUDA(TextureData& dst, int sampleCount)
+{
+    float* d_dst;
+    size_t dstSize = (size_t)dst.width * dst.height * COMPONENTS_PER_PIXEL_CUDA * sizeof(float);
+    CUDA_CHECK(cudaMalloc(&d_dst, dstSize));
+
+    dim3 block(BLOCK_SIZE_X, BLOCK_SIZE_Y, 1);
+    dim3 grid((dst.width + block.x - 1) / block.x, (dst.height + block.y - 1) / block.y, 1);
+
+    BakeBRDFLUTKernel<<<grid, block>>>(d_dst, dst.width, dst.height, sampleCount);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    CUDA_CHECK(cudaMemcpy(dst.data.data(), d_dst, dstSize, cudaMemcpyDeviceToHost));
 
     CUDA_CHECK(cudaFree(d_dst));
 }

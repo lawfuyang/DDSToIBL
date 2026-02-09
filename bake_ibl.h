@@ -13,3 +13,4 @@ struct TextureData
 
 void BakeIrradianceCUDA(const TextureData& src, TextureData& dst, int sampleCount);
 void BakeRadianceCUDA(const TextureData& src, TextureData& dst, int sampleCount);
+void BakeBRDFLUT_CUDA(TextureData& dst, int sampleCount);
