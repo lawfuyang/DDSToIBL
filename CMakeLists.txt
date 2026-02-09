@@ -36,7 +36,14 @@ list(APPEND CUDA_NVCC_FLAGS "-allow-unsupported-compiler")
 # Ensure CUDA uses the same Runtime Library (MD/MDd) as the rest of the project
 list(APPEND CUDA_NVCC_FLAGS "-Xcompiler" "/MD$<$<CONFIG:Debug>:d>")
 
+list(APPEND CUDA_NVCC_FLAGS "-gencode=arch=compute_75,code=sm_75")
+list(APPEND CUDA_NVCC_FLAGS "-gencode=arch=compute_80,code=sm_80")
+list(APPEND CUDA_NVCC_FLAGS "-gencode=arch=compute_86,code=sm_86")
+list(APPEND CUDA_NVCC_FLAGS "-gencode=arch=compute_87,code=sm_87")
+list(APPEND CUDA_NVCC_FLAGS "-gencode=arch=compute_90,code=sm_90")
+list(APPEND CUDA_NVCC_FLAGS "-gencode=arch=compute_100,code=sm_100")
 list(APPEND CUDA_NVCC_FLAGS "-gencode=arch=compute_120,code=sm_120")
+list(APPEND CUDA_NVCC_FLAGS "-gencode=arch=compute_120,code=compute_120")
 
 cuda_add_executable(${PROJECT_NAME} main.cpp bake_ibl.cu)
 
