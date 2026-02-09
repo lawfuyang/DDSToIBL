@@ -36,6 +36,8 @@ list(APPEND CUDA_NVCC_FLAGS "-allow-unsupported-compiler")
 # Ensure CUDA uses the same Runtime Library (MD/MDd) as the rest of the project
 list(APPEND CUDA_NVCC_FLAGS "-Xcompiler" "/MD$<$<CONFIG:Debug>:d>")
 
+list(APPEND CUDA_NVCC_FLAGS "-gencode=arch=compute_120,code=sm_120")
+
 cuda_add_executable(${PROJECT_NAME} main.cpp bake_ibl.cu)
 
 target_link_libraries(${PROJECT_NAME} DirectXTex ${CUDA_LIBRARIES})
