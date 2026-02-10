@@ -9,6 +9,12 @@ if(MSVC)
     add_compile_options(/MP)
 endif()
 
+# Download stb_image.h if not present
+if(NOT EXISTS "${CMAKE_SOURCE_DIR}/stb_image.h")
+    message(STATUS "Downloading stb_image.h...")
+    file(DOWNLOAD "https://raw.githubusercontent.com/nothings/stb/master/stb_image.h" "${CMAKE_SOURCE_DIR}/stb_image.h" SHOW_PROGRESS)
+endif()
+
 # Configure output directories
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_SOURCE_DIR}/bin)

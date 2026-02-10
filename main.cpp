@@ -1,17 +1,22 @@
 #define NOMINMAX
 
+#include <algorithm>
 #include <cassert>
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <string_view>
 #include <fstream>
-#include <cstdint>
-#include <chrono>
-#include <cstdlib>
+#include <string_view>
 
 #include "bake_ibl.h"
 
 #include <DirectXTex.h>
+
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_HDR
+#include "stb_image.h"
 
 using namespace DirectX;
 
@@ -128,59 +133,8 @@ ScratchImage ConvertEquirectangularToCubemap(const ScratchImage& equirect)
     return cube;
 }
 
-bool LoadDDSTexture(std::string_view path, TextureData& td)
+bool SetupTextureDataFromImage(ScratchImage& processed, TextureData& td, bool isCubemap)
 {
-    std::filesystem::path p(path);
-    std::wstring wpath = p.wstring();
-    TexMetadata metadata;
-    ScratchImage image;
-
-    printf("Loading DDS file: %.*s\n", (int)path.size(), path.data());
-
-    if (HRESULT result = LoadFromDDSFile(wpath.c_str(), DDS_FLAGS_NONE, &metadata, image);
-        FAILED(result))
-    {
-        printf("Error: Failed to load DDS file. %s\n", HRESULT_To_String(result));
-        assert(false && "Failed to load DDS file");
-        return false;
-    }
-
-    // Allow both cubemaps and 2D textures
-    bool isCubemap = metadata.IsCubemap();
-    if (!isCubemap && metadata.dimension != TEX_DIMENSION_TEXTURE2D)
-    {
-        printf("Error: Input must be a cubemap or 2D texture.\n");
-        assert(false && "Input must be a cubemap or 2D texture");
-        return false;
-    }
-
-    ScratchImage processed;
-
-    if (IsCompressed(metadata.format))
-    {
-        if (HRESULT result = Decompress(image.GetImages(), image.GetImageCount(), metadata, DXGI_FORMAT_R32G32B32A32_FLOAT, processed);
-            FAILED(result))
-        {
-            printf("Error: Failed to decompress DDS file. %s\n", HRESULT_To_String(result));
-            assert(false && "Failed to decompress DDS file");
-            return false;
-        }
-    }
-    else if (metadata.format != DXGI_FORMAT_R32G32B32A32_FLOAT)
-    {
-        if (HRESULT result = Convert(image.GetImages(), image.GetImageCount(), metadata, DXGI_FORMAT_R32G32B32A32_FLOAT, TEX_FILTER_LINEAR, TEX_THRESHOLD_DEFAULT, processed);
-            FAILED(result))
-        {
-            printf("Error: Failed to convert DDS file. %s\n", HRESULT_To_String(result));
-            assert(false && "Failed to convert DDS file");
-            return false;
-        }
-    }
-    else
-    {
-        processed = std::move(image);
-    }
-
     // Performance Optimization: If the input is extremely large (e.g. 4K), downsample it to something manageable for IBL baking.
     if (processed.GetMetadata().width > MAX_INPUT_SIZE || processed.GetMetadata().height > MAX_INPUT_SIZE)
     {
@@ -220,7 +174,6 @@ bool LoadDDSTexture(std::string_view path, TextureData& td)
         else
         {
             printf("Error: Failed to convert equirectangular to cubemap.\n");
-            assert(false && "Failed to convert equirectangular to cubemap");
             return false;
         }
     }
@@ -237,7 +190,6 @@ bool LoadDDSTexture(std::string_view path, TextureData& td)
         else
         {
             printf("Error: Failed to generate mipmaps.\n");
-            assert(false && "Failed to generate mipmaps");
             return false;
         }
     }
@@ -264,12 +216,99 @@ bool LoadDDSTexture(std::string_view path, TextureData& td)
         for (int face = 0; face < td.numFaces; ++face)
         {
             const Image* img = processed.GetImage(m, face, 0);
+            if (!img) return false;
             memcpy(&td.data[floatOffset], img->pixels, (size_t)mipW * mipH * BYTES_PER_PIXEL);
             floatOffset += (size_t)mipW * mipH * COMPONENTS_PER_PIXEL;
         }
     }
 
     return true;
+}
+
+bool LoadDDSTexture(std::string_view path, TextureData& td)
+{
+    std::filesystem::path p(path);
+    std::wstring wpath = p.wstring();
+    TexMetadata metadata;
+    ScratchImage image;
+
+    printf("Loading DDS file: %.*s\n", (int)path.size(), path.data());
+
+    if (HRESULT result = LoadFromDDSFile(wpath.c_str(), DDS_FLAGS_NONE, &metadata, image);
+        FAILED(result))
+    {
+        printf("Error: Failed to load DDS file. %s\n", HRESULT_To_String(result));
+        return false;
+    }
+
+    // Allow both cubemaps and 2D textures
+    bool isCubemap = metadata.IsCubemap();
+    if (!isCubemap && metadata.dimension != TEX_DIMENSION_TEXTURE2D)
+    {
+        printf("Error: Input must be a cubemap or 2D texture.\n");
+        return false;
+    }
+
+    ScratchImage processed;
+
+    if (IsCompressed(metadata.format))
+    {
+        if (HRESULT result = Decompress(image.GetImages(), image.GetImageCount(), metadata, DXGI_FORMAT_R32G32B32A32_FLOAT, processed);
+            FAILED(result))
+        {
+            printf("Error: Failed to decompress DDS file. %s\n", HRESULT_To_String(result));
+            return false;
+        }
+    }
+    else if (metadata.format != DXGI_FORMAT_R32G32B32A32_FLOAT)
+    {
+        if (HRESULT result = Convert(image.GetImages(), image.GetImageCount(), metadata, DXGI_FORMAT_R32G32B32A32_FLOAT, TEX_FILTER_LINEAR, TEX_THRESHOLD_DEFAULT, processed);
+            FAILED(result))
+        {
+            printf("Error: Failed to convert DDS file. %s\n", HRESULT_To_String(result));
+            return false;
+        }
+    }
+    else
+    {
+        processed = std::move(image);
+    }
+
+    return SetupTextureDataFromImage(processed, td, isCubemap);
+}
+
+bool LoadHDRTexture(std::string_view path, TextureData& td)
+{
+    printf("Loading HDR file: %.*s\n", (int)path.size(), path.data());
+
+    if (!stbi_is_hdr(path.data()))
+    {
+        printf("Error: File is not a valid HDR image.\n");
+        return false;
+    }
+
+    int width, height, channels;
+    float* data = stbi_loadf(path.data(), &width, &height, &channels, 4);
+    if (!data)
+    {
+        printf("Error: Failed to load HDR file with stb_image: %s\n", stbi_failure_reason());
+        return false;
+    }
+
+    ScratchImage image;
+    if (HRESULT result = image.Initialize2D(DXGI_FORMAT_R32G32B32A32_FLOAT, width, height, 1, 1);
+        FAILED(result))
+    {
+        printf("Error: Failed to initialize ScratchImage for HDR. %s\n", HRESULT_To_String(result));
+        stbi_image_free(data);
+        return false;
+    }
+
+    memcpy(image.GetPixels(), data, (size_t)width * height * 16);
+    stbi_image_free(data);
+
+    // HDR files loaded via stbi are always 2D equirectangular in this context
+    return SetupTextureDataFromImage(image, td, false);
 }
 
 void SaveDDS(std::string_view path, const TextureData& td, DXGI_FORMAT targetFormat = DXGI_FORMAT_UNKNOWN)
@@ -409,9 +448,9 @@ int main(int argc, char** argv)
 
     if (showHelp || (inputFile.empty() && !bakeBrdf))
     {
-        printf("Usage: DDSToIBL <input.dds> [options]\n");
+        printf("Usage: DDSToIBL <input.dds/.hdr> [options]\n");
         printf("Convert DDS cubemap or 2D (equirectangular) texture to IBL irradiance and radiance cubemaps.\n");
-        printf("Supported formats: All DDS formats including BC6H (via DirectXTex).\n");
+        printf("Supported formats: All DDS formats and HDR.\n");
         printf("Baking is performed on CUDA.\n");
         printf("Default irradiance cubemap face size: %u\n", DEFAULT_IRR_SIZE);
         printf("Default radiance cubemap face size: %u\n", DEFAULT_RAD_SIZE);
@@ -437,7 +476,21 @@ int main(int argc, char** argv)
     if (!brdfOnly && !inputFile.empty())
     {
         TextureData env;
-        if (!LoadDDSTexture(inputFile.string(), env))
+        bool loaded = false;
+        
+        std::string ext = inputFile.extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+        if (ext == ".hdr")
+        {
+            loaded = LoadHDRTexture(inputFile.string(), env);
+        }
+        else
+        {
+            loaded = LoadDDSTexture(inputFile.string(), env);
+        }
+
+        if (!loaded)
         {
             printf("Failed to load %s\n", inputFile.string().c_str());
             return 1;
