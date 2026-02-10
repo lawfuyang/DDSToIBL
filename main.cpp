@@ -18,6 +18,8 @@
 #define STBI_ONLY_HDR
 #include "stb_image.h"
 
+#include "tinyexr.h"
+
 using namespace DirectX;
 
 // Constants
@@ -311,6 +313,120 @@ bool LoadHDRTexture(std::string_view path, TextureData& td)
     return SetupTextureDataFromImage(image, td, false);
 }
 
+bool LoadEXRTexture(std::string_view path, TextureData& td)
+{
+    printf("Loading EXR file: %.*s\n", (int)path.size(), path.data());
+
+    EXRVersion exr_version;
+    int ret = ParseEXRVersionFromFile(&exr_version, path.data());
+    if (ret != TINYEXR_SUCCESS)
+    {
+        printf("Error: Failed to parse EXR version.\n");
+        return false;
+    }
+
+    EXRHeader exr_header;
+    InitEXRHeader(&exr_header);
+    const char* err = NULL;
+    ret = ParseEXRHeaderFromFile(&exr_header, &exr_version, path.data(), &err);
+    if (ret != TINYEXR_SUCCESS)
+    {
+        if (err)
+        {
+            printf("Error: Failed to parse EXR header: %s\n", err);
+            FreeEXRErrorMessage(err);
+        }
+        return false;
+    }
+
+    bool isCubemap = false;
+    for (int i = 0; i < exr_header.num_custom_attributes; ++i)
+    {
+        if (strcmp(exr_header.custom_attributes[i].name, "envmap") == 0)
+        {
+            // envmap attribute: 0 = latlong, 1 = cubemap
+            if (exr_header.custom_attributes[i].size == 1 && exr_header.custom_attributes[i].value[0] == 1)
+            {
+                isCubemap = true;
+            }
+        }
+    }
+
+    FreeEXRHeader(&exr_header);
+
+    float* out; // width * height * RGBA
+    int width;
+    int height;
+    const char* layerName = NULL; // Load the first layer
+    err = NULL;
+
+    ret = LoadEXRWithLayer(&out, &width, &height, path.data(), layerName, &err);
+    if (ret != TINYEXR_SUCCESS)
+    {
+        if (err)
+        {
+            printf("Error: Failed to load EXR file: %s\n", err);
+            FreeEXRErrorMessage(err);
+        }
+        else
+        {
+            printf("Error: Failed to load EXR file (unknown error).\n");
+        }
+        return false;
+    }
+
+    ScratchImage image;
+    if (isCubemap && height == width * 6)
+    {
+        printf("Detected EXR cubemap (vertical strip).\n");
+        TexMetadata cubeMeta = {};
+        cubeMeta.width = width;
+        cubeMeta.height = width;
+        cubeMeta.depth = 1;
+        cubeMeta.arraySize = 6;
+        cubeMeta.mipLevels = 1;
+        cubeMeta.format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        cubeMeta.dimension = TEX_DIMENSION_TEXTURE2D;
+        cubeMeta.miscFlags = TEX_MISC_TEXTURECUBE;
+
+        if (HRESULT result = image.Initialize(cubeMeta);
+            FAILED(result))
+        {
+            printf("Error: Failed to initialize ScratchImage for EXR cubemap. %s\n", HRESULT_To_String(result));
+            free(out);
+            return false;
+        }
+
+        for (int face = 0; face < 6; ++face)
+        {
+            const Image* img = image.GetImage(0, face, 0);
+            memcpy(img->pixels, out + (size_t)face * width * width * 4, (size_t)width * width * 16);
+        }
+    }
+    else
+    {
+        if (isCubemap)
+        {
+            printf("Warning: EXR marked as cubemap but layout is not a vertical strip (height != 6 * width). Treating as 2D equirectangular.\n");
+            isCubemap = false;
+        }
+
+        if (HRESULT result = image.Initialize2D(DXGI_FORMAT_R32G32B32A32_FLOAT, width, height, 1, 1);
+            FAILED(result))
+        {
+            printf("Error: Failed to initialize ScratchImage for EXR. %s\n", HRESULT_To_String(result));
+            free(out);
+            return false;
+        }
+        memcpy(image.GetPixels(), out, (size_t)width * height * 16);
+    }
+
+    free(out);
+
+    // If isCubemap is true, it means it's already a cubemap in the ScratchImage
+    return SetupTextureDataFromImage(image, td, isCubemap);
+}
+
 void SaveDDS(std::string_view path, const TextureData& td, DXGI_FORMAT targetFormat = DXGI_FORMAT_UNKNOWN)
 {
     std::filesystem::path p(path);
@@ -446,11 +562,13 @@ int main(int argc, char** argv)
         }
     }
 
+        inputFile = "D:\\Workspace\\GLTF Scenes\\RTXPT-Assets\\EnvironmentMaps\\simplebluesky.exr";
+
     if (showHelp || (inputFile.empty() && !bakeBrdf))
     {
-        printf("Usage: DDSToIBL <input.dds/.hdr> [options]\n");
-        printf("Convert DDS cubemap or 2D (equirectangular) texture to IBL irradiance and radiance cubemaps.\n");
-        printf("Supported formats: All DDS formats and HDR.\n");
+        printf("Usage: DDSToIBL <input.dds/.hdr/.exr> [options]\n");
+        printf("Convert DDS cubemap, 2D (equirectangular) HDR, or EXR texture to IBL irradiance and radiance cubemaps.\n");
+        printf("Supported formats: All DDS formats, HDR, and EXR.\n");
         printf("Baking is performed on CUDA.\n");
         printf("Default irradiance cubemap face size: %u\n", DEFAULT_IRR_SIZE);
         printf("Default radiance cubemap face size: %u\n", DEFAULT_RAD_SIZE);
@@ -484,6 +602,10 @@ int main(int argc, char** argv)
         if (ext == ".hdr")
         {
             loaded = LoadHDRTexture(inputFile.string(), env);
+        }
+        else if (ext == ".exr")
+        {
+            loaded = LoadEXRTexture(inputFile.string(), env);
         }
         else
         {

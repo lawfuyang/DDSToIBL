@@ -34,7 +34,11 @@ set(ENABLE_OPENEXR_SUPPORT OFF CACHE BOOL "Build with OpenEXR support" FORCE)
 set(ENABLE_LIBJPEG_SUPPORT OFF CACHE BOOL "Build with libjpeg support" FORCE)
 set(ENABLE_LIBPNG_SUPPORT OFF CACHE BOOL "Build with libpng support" FORCE)
 
+set(TINYEXR_BUILD_SAMPLE OFF CACHE BOOL "Build tinyexr sample" FORCE)
+set(TINYEXR_USE_MINIZ ON CACHE BOOL "Use miniz" FORCE)
+
 add_subdirectory(DirectXTex)
+add_subdirectory(tinyexr)
 
 # Legacy find
 find_package(CUDA REQUIRED)
@@ -57,8 +61,8 @@ list(APPEND CUDA_NVCC_FLAGS "-gencode=arch=compute_120,code=compute_120")
 
 cuda_add_executable(${PROJECT_NAME} main.cpp bake_ibl.cu)
 
-target_link_libraries(${PROJECT_NAME} DirectXTex ${CUDA_LIBRARIES})
-target_include_directories(${PROJECT_NAME} PRIVATE DirectXTex/DirectXTex)
+target_link_libraries(${PROJECT_NAME} DirectXTex tinyexr ${CUDA_LIBRARIES})
+target_include_directories(${PROJECT_NAME} PRIVATE DirectXTex/DirectXTex tinyexr)
 
 # Fix LNK4098 warning by ignoring LIBCMT
 if(MSVC)

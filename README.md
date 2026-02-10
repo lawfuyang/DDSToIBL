@@ -1,6 +1,8 @@
 # DDS to IBL
 
-A C++ command-line tool that generates Image-Based Lighting (IBL) assets from DDS textures using CUDA acceleration. Converts HDR DDS cubemaps or equirectangular 2D textures into irradiance and radiance cubemaps optimized for physically-based rendering.
+A C++ command-line tool that generates Image-Based Lighting (IBL) assets from DDS, HDR, and EXR textures using CUDA acceleration. Converts HDR DDS cubemaps or equirectangular 2D textures into irradiance and radiance cubemaps optimized for physically-based rendering.
+
+**Note:** While the repository is named "DDS to IBL", the tool supports input images in DDS, HDR, and EXR formats, not limited to DDS.
 
 ### Dependencies
 
@@ -9,7 +11,7 @@ A C++ command-line tool that generates Image-Based Lighting (IBL) assets from DD
 ## Usage
 
 ```
-DDSToIBL <input.dds/.hdr> [options]
+DDSToIBL <input.dds/.hdr/.exr> [options]
 ```
 
 ### Examples
@@ -30,9 +32,9 @@ DDSToIBL --brdf-only -l 512 -n 2048
 
 ### Inputs
 
-- **input.dds/.hdr**: Linear HDR texture file
+- **input.dds/.hdr/.exr**: Linear HDR texture file
   - DDS cubemaps in any supported format
-  - Equirectangular 2D textures (.hdr format supported)
+  - Equirectangular 2D textures
   - If equirectangular, automatically converted to cubemap
 
 ### Outputs
