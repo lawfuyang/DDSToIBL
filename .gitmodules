@@ -1,3 +1,6 @@
 [submodule "DirectXTex"]
 	path = DirectXTex
 	url = https://github.com/microsoft/DirectXTex
+[submodule "tinyexr"]
+	path = tinyexr
+	url = https://github.com/syoyo/tinyexr
