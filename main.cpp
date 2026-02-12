@@ -562,8 +562,6 @@ int main(int argc, char** argv)
         }
     }
 
-        inputFile = "D:\\Workspace\\GLTF Scenes\\RTXPT-Assets\\EnvironmentMaps\\simplebluesky.exr";
-
     if (showHelp || (inputFile.empty() && !bakeBrdf))
     {
         printf("Usage: DDSToIBL <input.dds/.hdr/.exr> [options]\n");
